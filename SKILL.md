@@ -1,5 +1,7 @@
 ---
 name: session-merge
+author: Quilee Simeon <qsimeon@mit.edu>
+url: https://qsimeon.github.io/session-merge
 description: |
   **Claude Code Session Merger**: Merge two or more Claude Code conversation sessions into a single unified session. Use this skill whenever the user mentions merging sessions, combining sessions, session splitting problems, reuniting split sessions, consolidating conversation history, or wants to combine work from separate Claude Code sessions into one. Also trigger when the user complains about sessions being split unexpectedly, losing context across sessions, or wanting a "mega session" from multiple conversations. This skill works with the JSONL session files stored in ~/.claude/projects/.
 ---
