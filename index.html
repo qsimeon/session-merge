@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>session-merge — Merge Claude Code Sessions</title>
+  <meta name="description" content="A Claude Code skill for merging split or related sessions into one continuous conversation history.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --border: #1e1e2a;
+      --text: #e0e0ea;
+      --muted: #6a6a7a;
+      --accent: #c8a84b;
+      --accent-hover: #dab85f;
+      --code-bg: #0e0e16;
+      --green: #4ade80;
+      --red: #f87171;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; transition: color 0.2s; }
+    a:hover { color: var(--accent-hover); }
+
+    .container { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+
+    /* Hero */
+    .hero {
+      padding: 80px 0 60px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .hero-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border: 1px solid var(--accent);
+      border-radius: 20px;
+      font-size: 0.75rem;
+      color: var(--accent);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+    .hero h1 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, var(--text), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero p {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 540px;
+      margin: 0 auto 32px;
+    }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: var(--accent); color: var(--bg); }
+    .btn-primary:hover { background: var(--accent-hover); color: var(--bg); transform: translateY(-1px); }
+    .btn-outline { border: 1px solid var(--border); color: var(--text); }
+    .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Content sections */
+    section { padding: 48px 0; border-bottom: 1px solid var(--border); }
+    section:last-of-type { border-bottom: none; }
+    h2 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.4rem;
+      margin-bottom: 20px;
+      color: var(--text);
+    }
+    h2 .hash { color: var(--accent); margin-right: 8px; }
+    p + p { margin-top: 12px; }
+
+    /* Code blocks */
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      overflow-x: auto;
+      margin: 16px 0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+    }
+    code { font-family: 'JetBrains Mono', monospace; }
+    .inline-code {
+      background: var(--surface);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+    .comment { color: var(--muted); }
+    .flag { color: var(--accent); }
+    .string { color: var(--green); }
+
+    /* The problem section */
+    .problem-box {
+      background: var(--surface);
+      border-left: 3px solid var(--red);
+      padding: 20px 24px;
+      border-radius: 0 8px 8px 0;
+      margin: 16px 0;
+    }
+    .solution-box {
+      background: var(--surface);
+      border-left: 3px solid var(--green);
+      padding: 20px 24px;
+      border-radius: 0 8px 8px 0;
+      margin: 16px 0;
+    }
+
+    /* How it works */
+    .steps {
+      display: grid;
+      gap: 16px;
+      margin: 20px 0;
+    }
+    .step {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+      padding: 16px;
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .step-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      color: var(--accent);
+      font-size: 1.1rem;
+      min-width: 28px;
+    }
+    .step-text { flex: 1; }
+    .step-text strong { color: var(--text); }
+    .step-text p { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+
+    /* File tree */
+    .file-tree {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 16px 0;
+    }
+    .file-tree .dir { color: var(--accent); }
+    .file-tree .file { color: var(--muted); }
+
+    /* Footer */
+    footer {
+      padding: 40px 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--accent); }
+
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 1.8rem; }
+      .hero { padding: 48px 0 40px; }
+      section { padding: 32px 0; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <header class="hero">
+    <div class="hero-badge">Claude Code Skill</div>
+    <h1>session-merge</h1>
+    <p>Merge split or related Claude Code sessions into a single continuous conversation history.</p>
+    <div class="hero-actions">
+      <a href="https://github.com/qsimeon/session-merge" class="btn btn-primary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+      <a href="#install" class="btn btn-outline">Install</a>
+    </div>
+  </header>
+
+  <section>
+    <h2><span class="hash">#</span> The Problem</h2>
+    <div class="problem-box">
+      <p>Claude Code sessions split unexpectedly. You're deep in a session, you <code class="inline-code">cd</code> to a different directory, or you <code class="inline-code">/exit</code> and <code class="inline-code">--resume</code>, and suddenly your single conversation has been fragmented into two separate sessions. The older one has all your context and history; the newer one has your latest work. There's no built-in way to put them back together.</p>
+    </div>
+    <p>This happens because Claude Code scopes sessions to working directories. Change your <code class="inline-code">cwd</code> and it may silently create a new session, inheriting the name but not the history. Over time, you accumulate duplicate-named sessions that were supposed to be one continuous conversation.</p>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> The Solution</h2>
+    <div class="solution-box">
+      <p><strong>session-merge</strong> is a Claude Code skill that detects split sessions and merges them back together. It works directly with the JSONL session files in <code class="inline-code">~/.claude/projects/</code>, combining entries chronologically and producing a single unified session you can resume normally.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> Quick Start</h2>
+    <p>Find all your split sessions (sessions sharing the same name):</p>
+    <pre><span class="comment"># Detect all split session groups</span>
+bash ~/.claude/skills/session-merge/scripts/merge_sessions.sh <span class="flag">--find-splits</span></pre>
+    <p>Auto-fix all of them at once:</p>
+    <pre><span class="comment"># Merge every split group back into one session</span>
+bash ~/.claude/skills/session-merge/scripts/merge_sessions.sh <span class="flag">--merge-splits</span></pre>
+    <p>Or merge specific sessions manually:</p>
+    <pre><span class="comment"># Dry run first</span>
+bash merge_sessions.sh <span class="flag">--dry-run</span> <span class="flag">--name</span> <span class="string">"my-session"</span> &lt;id1&gt; &lt;id2&gt;
+
+<span class="comment"># Execute the merge</span>
+bash merge_sessions.sh <span class="flag">--name</span> <span class="string">"my-session"</span> &lt;id1&gt; &lt;id2&gt;
+
+<span class="comment"># Resume the merged session</span>
+claude <span class="flag">--resume</span> <span class="string">"my-session"</span></pre>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> How It Works</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="step-num">1</span>
+        <div class="step-text">
+          <strong>Collects</strong> all JSONL entries from each source session
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">2</span>
+        <div class="step-text">
+          <strong>Sorts</strong> entries chronologically by timestamp, interleaving conversations in the order they actually happened
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">3</span>
+        <div class="step-text">
+          <strong>Rewrites</strong> the <code class="inline-code">sessionId</code> field on every entry to the new merged UUID, so Claude Code treats them as one session
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">4</span>
+        <div class="step-text">
+          <strong>Copies</strong> subagent files and updates the session index metadata
+        </div>
+      </div>
+    </div>
+    <p>Message threading (<code class="inline-code">parentUuid</code>) within each original session is preserved. Only the session-level identity changes.</p>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> All Flags</h2>
+    <pre><span class="flag">--list</span>            List all sessions across all projects
+<span class="flag">--list-project</span> &lt;p&gt; List sessions for a specific project
+<span class="flag">--find-splits</span>     Detect duplicate-named session groups
+<span class="flag">--merge-splits</span>    Auto-merge all split groups (with confirm)
+<span class="flag">--name</span> &lt;name&gt;     Name for the merged session
+<span class="flag">--delete-sources</span>  Remove originals after merge
+<span class="flag">--dry-run</span>         Preview without making changes
+<span class="flag">--output-id</span> &lt;id&gt;  Specify a UUID for the merged session</pre>
+  </section>
+
+  <section id="install">
+    <h2><span class="hash">#</span> Install</h2>
+    <p>Copy the skill into your Claude Code skills directory:</p>
+    <pre><span class="comment"># Clone the repo</span>
+git clone https://github.com/qsimeon/session-merge.git
+
+<span class="comment"># Copy to your Claude skills directory</span>
+cp -r session-merge ~/.claude/skills/session-merge
+
+<span class="comment"># Or symlink it</span>
+ln -s $(pwd)/session-merge ~/.claude/skills/session-merge</pre>
+    <p>Then invoke it from any Claude Code session with <code class="inline-code">/session-merge</code>.</p>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> File Structure</h2>
+    <div class="file-tree">
+<span class="dir">session-merge/</span>
+├── <span class="file">SKILL.md</span>          <span class="comment"># Skill definition (Claude reads this)</span>
+└── <span class="dir">scripts/</span>
+    └── <span class="file">merge_sessions.sh</span>  <span class="comment"># The merge engine (~800 lines)</span>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="hash">#</span> Why Sessions Split</h2>
+    <p>Claude Code sessions are scoped to working directories. The most common causes of unexpected splits:</p>
+    <div class="steps">
+      <div class="step">
+        <span class="step-num">cd</span>
+        <div class="step-text">
+          <strong>Directory changes</strong>
+          <p>Running <code class="inline-code">cd</code> to a different project path can trigger a new session scoped to the new directory.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">^^</span>
+        <div class="step-text">
+          <strong>Exit/resume cycles</strong>
+          <p><code class="inline-code">claude --resume</code> sometimes reconnects to the wrong session when multiple share the same name.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="step-num">up</span>
+        <div class="step-text">
+          <strong>Version updates</strong>
+          <p>Upgrading Claude Code between sessions can occasionally break session continuity.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Built by <a href="https://qsimeon.github.io">Quilee Simeon</a>. MIT Licensed.</p>
+    <p style="margin-top: 8px;">Made with Claude Code, naturally.</p>
+  </footer>
+</div>
+
+</body>
+</html>
