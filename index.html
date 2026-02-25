@@ -214,7 +214,7 @@
   <section>
     <h2><span class="hash">#</span> The Solution</h2>
     <div class="solution-box">
-      <p><strong>session-merge</strong> is a Claude Code skill that detects split sessions and merges them back together. It works directly with the JSONL session files in <code class="inline-code">~/.claude/projects/</code>, combining entries chronologically and producing a single unified session you can resume normally.</p>
+      <p><strong>session-merge</strong> is a Claude Code skill that detects split sessions and merges them back together. It works directly with the JSONL session files in <code class="inline-code">~/.claude/projects/</code>, stitching conversation trees together and producing a single unified session you can resume from your home directory.</p>
     </div>
   </section>
 
@@ -233,8 +233,8 @@ bash merge_sessions.sh <span class="flag">--dry-run</span> <span class="flag">--
 <span class="comment"># Execute the merge</span>
 bash merge_sessions.sh <span class="flag">--name</span> <span class="string">"my-session"</span> &lt;id1&gt; &lt;id2&gt;
 
-<span class="comment"># Resume the merged session</span>
-claude <span class="flag">--resume</span> <span class="string">"my-session"</span></pre>
+<span class="comment"># Resume the merged session (always from ~)</span>
+cd ~ &amp;&amp; claude <span class="flag">--resume</span> &lt;merged-session-uuid&gt;</pre>
   </section>
 
   <section>
@@ -249,23 +249,23 @@ claude <span class="flag">--resume</span> <span class="string">"my-session"</spa
       <div class="step">
         <span class="step-num">2</span>
         <div class="step-text">
-          <strong>Sorts</strong> entries chronologically by timestamp, interleaving conversations in the order they actually happened
+          <strong>Finds the main trunk</strong> of each session — the longest <code class="inline-code">parentUuid</code> chain from leaf to root
         </div>
       </div>
       <div class="step">
         <span class="step-num">3</span>
         <div class="step-text">
-          <strong>Rewrites</strong> the <code class="inline-code">sessionId</code> field on every entry to the new merged UUID, so Claude Code treats them as one session
+          <strong>Stitches trunks together</strong> by linking the root of session N+1 to the leaf of session N, creating one continuous conversation chain
         </div>
       </div>
       <div class="step">
         <span class="step-num">4</span>
         <div class="step-text">
-          <strong>Copies</strong> subagent files and updates the session index metadata
+          <strong>Writes</strong> all entries to the home directory project (<code class="inline-code">~/.claude/projects/</code>) with updated session IDs and index metadata
         </div>
       </div>
     </div>
-    <p>Message threading (<code class="inline-code">parentUuid</code>) within each original session is preserved. Only the session-level identity changes.</p>
+    <p>Tree stitching ensures Claude Code can walk one continuous <code class="inline-code">parentUuid</code> chain when resuming, rather than seeing disconnected fragments. All merged sessions live in your home directory project so they're always resumable from <code class="inline-code">~</code>.</p>
   </section>
 
   <section>

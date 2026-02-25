@@ -38,27 +38,11 @@ This skill includes a bash script at `scripts/merge_sessions.sh` that handles th
 
 ## Workflow
 
-When the user invokes this skill, walk them through these steps:
+When the user invokes this skill, you MUST follow these steps in order. Do NOT skip Step 1.
 
-### Quick Fix: Auto-Merge All Splits
+### Step 1: Discover Sessions (REQUIRED FIRST STEP)
 
-If the user just wants to fix all split sessions at once, use the quick path:
-
-```bash
-bash <skill-path>/scripts/merge_sessions.sh --find-splits
-```
-
-This shows all session groups that share the same name (i.e., sessions that were split). If the user wants to merge them all:
-
-```bash
-bash <skill-path>/scripts/merge_sessions.sh --merge-splits
-```
-
-This will prompt for confirmation, then automatically merge each group back into a single session using the original name.
-
-### Step 1: Discover Sessions
-
-Run the list command to show all available sessions:
+**ALWAYS start here.** Run the list command to show all available sessions:
 
 ```bash
 bash <skill-path>/scripts/merge_sessions.sh --list
@@ -71,6 +55,8 @@ If the list is very long, offer to filter by project:
 ```bash
 bash <skill-path>/scripts/merge_sessions.sh --list-project /path/to/project
 ```
+
+**Do NOT run `--find-splits` or `--merge-splits` before running `--list` first.** The `--list` command uses only basic bash and always works. The split-detection commands require bash 4+ (associative arrays) and may fail on macOS default bash.
 
 ### Step 2: Confirm Merge Parameters
 
@@ -110,24 +96,46 @@ After merging, confirm success by:
 
 1. Checking the merged file exists and has the expected size
 2. Running `--list` again to show the new session appears
-3. Telling the user how to resume the merged session: `claude --resume "chosen-name"`
+3. **IMPORTANT**: Tell the user to resume using the **session ID** (UUID), not the name. The name may not appear in the picker immediately. Example: `cd ~ && claude --resume <session-uuid>`. Once inside the session, the name will be set correctly and they can rename if needed.
+
+### Optional: Auto-Merge All Splits
+
+Only use this AFTER you've confirmed `--list` works successfully. If the user wants to fix all split sessions at once (sessions sharing the same name), you can use:
+
+```bash
+bash <skill-path>/scripts/merge_sessions.sh --find-splits
+```
+
+This shows all session groups that share the same name. If the user wants to merge them all:
+
+```bash
+bash <skill-path>/scripts/merge_sessions.sh --merge-splits
+```
+
+Note: These commands require bash 4+ (for associative arrays). On macOS, the script will attempt to find Homebrew's bash automatically, but if it fails, fall back to the manual workflow (Steps 1–5 above).
 
 ## What the Merge Does Technically
 
 The merge process:
 
 1. **Collects** all JSONL entries from every source session
-2. **Sorts** them chronologically by the `timestamp` field — this interleaves the conversations in the order they actually happened
-3. **Rewrites** the `sessionId` field on every entry to the new merged session's UUID, so Claude Code treats them as one continuous session
-4. **Updates** the `slug` field (if a name was provided) so the session is findable by name
-5. **Copies** all subagent files from source sessions into the merged session's subagent directory
-6. **Updates** the `sessions-index.json` metadata file with the new session entry
+2. **Finds the main conversation trunk** of each session (the longest parentUuid chain from leaf to root)
+3. **Sorts sessions** chronologically by their earliest timestamp
+4. **Stitches trunks together**: sets the root of session N+1's parentUuid to the leaf of session N, creating one continuous chain
+5. **Sorts all entries** by timestamp and writes them with the new merged `sessionId`
+6. **Updates** the `slug` field (if a name was provided) so the session is findable by name
+7. **Copies** all subagent files from source sessions into the merged session's subagent directory
+8. **Creates/updates** the `sessions-index.json` metadata file with the new session entry
 
-The `parentUuid` threading within each original session is preserved — messages still reference their correct parent. The only change is that all entries now share a single `sessionId`.
+The tree stitching ensures Claude Code can walk one continuous parentUuid chain when resuming the merged session, rather than seeing disconnected conversation fragments.
+
+## Where Merged Sessions Live
+
+**All merged sessions are placed in the home directory project** (`~/.claude/projects/-Users-<username>/`). This means merged sessions are always resumable from `~` with `cd ~ && claude --resume "session-name"`, regardless of which project directories the source sessions originally came from.
 
 ## Important Caveats
 
-- **Cross-project merges**: If sessions are from different projects (different working directories), the merged session is placed in the first session's project directory. This is fine for resuming, but the working directory context (`cwd`) in each message still reflects the original directory at the time.
+- **Resume from home**: Merged sessions always live in the `~` project. Resume with `cd ~ && claude --resume "name"`.
 - **No semantic deduplication**: This is a chronological merge, not a smart content-aware merge. If both sessions have overlapping content (e.g., the same file was read in both), both entries appear in the merged history.
 - **Context window**: Merging doesn't change Claude's context window behavior. When you resume the merged session, Claude still has its normal context limits. But the full history is available for reference and the session picker will show it as one session.
 - **Backup recommendation**: The `--dry-run` flag exists for a reason. Encourage users to verify before committing, and suggest keeping source sessions until they've confirmed the merge looks right.

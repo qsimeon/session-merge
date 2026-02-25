@@ -26,6 +26,19 @@
 #
 # Requirements: bash 4+, jq, python3 (for UUID generation and JSON processing)
 
+# ── Bash 4+ auto-detection ──
+# macOS ships bash 3.2 which lacks associative arrays (declare -A).
+# If we're on bash < 4, find a newer bash and re-exec.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    for _bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [ -x "$_bash" ] && "$_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null | grep -qE '^[4-9]'; then
+            exec "$_bash" "$0" "$@"
+        fi
+    done
+    echo "Error: bash 4+ is required. Install with: brew install bash" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
@@ -194,7 +207,12 @@ except:
     echo -e "${BOLD}Total: $total sessions${NC}"
 }
 
-# Merge JSONL files sorted by timestamp
+# Merge JSONL files with tree stitching
+# Sessions are conversation trees where each entry has a parentUuid pointing
+# to its predecessor. Simply sorting by timestamp creates disconnected forests.
+# Tree stitching finds the main conversation trunk of each session and connects
+# them: the root of session N+1 gets its parentUuid set to the leaf of session N.
+# This way Claude Code can walk one continuous chain when resuming.
 merge_jsonl_files() {
     local output_file="$1"
     local new_session_id="$2"
@@ -202,22 +220,25 @@ merge_jsonl_files() {
     shift 3
     local input_files=("$@")
 
-    info "Merging ${#input_files[@]} JSONL files..."
+    info "Merging ${#input_files[@]} JSONL files with tree stitching..."
 
-    # Use Python for reliable JSON processing and timestamp sorting
-    python3 << PYEOF
-import json
-import sys
-from datetime import datetime
+    # Build JSON array of input files for Python
+    local files_json
+    files_json=$(printf '%s\n' "${input_files[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 
-input_files = $(printf '%s\n' "${input_files[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
-new_session_id = "$new_session_id"
-new_slug = "$new_slug"
-output_file = "$output_file"
+    local tmp_script="/tmp/merge_sessions_$$.py"
+    cat > "$tmp_script" << 'PYEOF'
+import json, sys, os
 
-all_entries = []
+input_files = json.loads(sys.argv[1])
+new_session_id = sys.argv[2]
+new_slug = sys.argv[3]
+output_file = sys.argv[4]
 
+# ── Phase 1: Load all entries per file ──
+file_entries = {}
 for filepath in input_files:
+    entries = []
     with open(filepath, 'r') as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -225,30 +246,133 @@ for filepath in input_files:
                 continue
             try:
                 entry = json.loads(line)
-                # Store original for sorting
-                ts = entry.get('timestamp', '1970-01-01T00:00:00.000Z')
-                all_entries.append((ts, entry, filepath))
+                entries.append(entry)
             except json.JSONDecodeError:
-                print(f"Warning: Skipping malformed JSON at {filepath}:{line_num}", file=sys.stderr)
+                print(f"  Warning: Skipping malformed JSON at {filepath}:{line_num}", file=sys.stderr)
+    file_entries[filepath] = entries
+    print(f"  Loaded {len(entries)} entries from ...{os.path.basename(filepath)}")
 
-# Sort by timestamp
+# ── Phase 2: Find the main conversation trunk per source ──
+# The trunk is the longest parentUuid chain from any leaf to the root.
+# This is the "main" conversation path Claude would walk when resuming.
+def find_main_trunk(entries):
+    """Returns (root_uuid, leaf_uuid, set_of_trunk_uuids)"""
+    uuid_to_entry = {}
+    for e in entries:
+        uid = e.get('uuid', '')
+        if uid:
+            uuid_to_entry[uid] = e
+
+    all_uuids = set(uuid_to_entry.keys())
+    # A leaf is a uuid that no other entry points to as parent
+    parent_uuids = set()
+    for e in entries:
+        pid = e.get('parentUuid', '')
+        if pid:
+            parent_uuids.add(pid)
+
+    leaf_uuids = all_uuids - parent_uuids
+
+    # Walk backwards from each leaf, find the longest chain
+    best_leaf = None
+    best_depth = 0
+    best_chain = []
+
+    for leaf_uid in leaf_uuids:
+        chain = []
+        current = leaf_uid
+        visited = set()
+        while current and current in uuid_to_entry and current not in visited:
+            chain.append(current)
+            visited.add(current)
+            current = uuid_to_entry[current].get('parentUuid', '')
+        if len(chain) > best_depth:
+            best_depth = len(chain)
+            best_leaf = leaf_uid
+            best_chain = chain
+
+    if not best_chain:
+        return None, None, set()
+
+    root_uuid = best_chain[-1]  # last in chain = root (no parent)
+    return root_uuid, best_leaf, set(best_chain)
+
+# Build trunk info per source, sorted by earliest timestamp
+source_trunks = []
+for filepath in input_files:
+    entries = file_entries[filepath]
+    if not entries:
+        continue
+    root_uid, leaf_uid, trunk_set = find_main_trunk(entries)
+    timestamps = [e.get('timestamp', '9999') for e in entries if e.get('timestamp')]
+    earliest = min(timestamps) if timestamps else '9999'
+    source_trunks.append((earliest, filepath, root_uid, leaf_uid, trunk_set))
+    trunk_len = len(trunk_set) if trunk_set else 0
+    root_short = str(root_uid)[:8] if root_uid else 'none'
+    leaf_short = str(leaf_uid)[:8] if leaf_uid else 'none'
+    print(f"  Trunk: {trunk_len} entries, root={root_short}..., leaf={leaf_short}...")
+
+# Sort sessions chronologically by earliest timestamp
+source_trunks.sort(key=lambda x: x[0])
+
+# ── Phase 3: Build stitch map ──
+# Connect leaf of session N to root of session N+1
+stitch_map = {}  # root_uuid -> prev_leaf_uuid
+for i in range(1, len(source_trunks)):
+    prev_leaf = source_trunks[i-1][3]
+    curr_root = source_trunks[i][2]
+    if prev_leaf and curr_root:
+        stitch_map[curr_root] = prev_leaf
+        print(f"  Stitch: root {curr_root[:8]}... -> leaf {prev_leaf[:8]}...")
+
+# ── Phase 4: Collect all entries, sort, stitch, write ──
+all_entries = []
+for filepath in input_files:
+    for entry in file_entries[filepath]:
+        ts = entry.get('timestamp', '1970-01-01T00:00:00.000Z')
+        all_entries.append((ts, entry))
+
 all_entries.sort(key=lambda x: x[0])
+print(f"  Total entries: {len(all_entries)}")
 
-print(f"Total entries collected: {len(all_entries)}")
+from datetime import datetime, timezone
+import uuid as uuid_mod
 
-# Write merged output
 with open(output_file, 'w') as out:
-    for ts, entry, source in all_entries:
-        # Update sessionId to the new merged one
+    for ts, entry in all_entries:
+        # Update sessionId
         if 'sessionId' in entry:
             entry['sessionId'] = new_session_id
-        # Update slug if provided
-        if new_slug and 'slug' in entry:
+        # Update slug on ALL entries (not just ones that already have it)
+        if new_slug:
             entry['slug'] = new_slug
+
+        # Apply tree stitching: if this entry's uuid is a root that needs
+        # connecting, set its parentUuid to the previous session's leaf
+        uid = entry.get('uuid', '')
+        if uid in stitch_map:
+            entry['parentUuid'] = stitch_map[uid]
+
         out.write(json.dumps(entry, separators=(',', ':')) + '\n')
 
-print(f"Merged file written to: {output_file}")
+    # Append a custom-title entry so Claude Code's session picker shows the name
+    if new_slug:
+        now_ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        title_entry = {
+            "type": "custom-title",
+            "customTitle": new_slug,
+            "sessionId": new_session_id,
+            "uuid": str(uuid_mod.uuid4()),
+            "timestamp": now_ts
+        }
+        out.write(json.dumps(title_entry, separators=(',', ':')) + '\n')
+        print(f"  Added custom-title entry: {new_slug}")
+
+print(f"  Merged file written: {output_file}")
 PYEOF
+
+    python3 "$tmp_script" "$files_json" "$new_session_id" "$new_slug" "$output_file"
+    rm -f "$tmp_script"
 }
 
 # Copy subagent files from source sessions
@@ -285,71 +409,101 @@ copy_subagents() {
     done
 }
 
-# Update sessions-index.json
+# Update or create sessions-index.json
 update_session_index() {
     local project_dir="$1"
     local new_session_id="$2"
     local new_slug="$3"
     local merged_jsonl="$4"
 
-    local index_file="$project_dir/sessions-index.json"
+    local index_file="${project_dir}sessions-index.json"
 
     # Get metadata from the merged file
-    local first_ts last_ts line_count
+    local first_ts last_ts line_count first_prompt
     first_ts=$(head -1 "$merged_jsonl" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('timestamp',''))" 2>/dev/null || echo "")
     last_ts=$(tail -1 "$merged_jsonl" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('timestamp',''))" 2>/dev/null || echo "")
     line_count=$(wc -l < "$merged_jsonl" | tr -d ' ')
 
-    if [ -f "$index_file" ]; then
-        info "Updating sessions-index.json..."
-        python3 << PYEOF
-import json
-
-index_file = "$index_file"
-new_id = "$new_session_id"
-new_slug = "$new_slug"
-first_ts = "$first_ts"
-last_ts = "$last_ts"
-line_count = $line_count
-
+    # Get first user message for the index
+    first_prompt=$(grep '"type":"user"' "$merged_jsonl" 2>/dev/null | head -1 | python3 -c "
+import sys, json
 try:
-    with open(index_file, 'r') as f:
-        index = json.load(f)
-except (json.JSONDecodeError, FileNotFoundError):
-    index = {}
+    obj = json.loads(sys.stdin.read())
+    msg = obj.get('message', {})
+    content = msg.get('content', '')
+    if isinstance(content, list):
+        content = ' '.join(c.get('text', '') for c in content if isinstance(c, dict))
+    print(content[:120])
+except:
+    print('')
+" 2>/dev/null || echo "")
 
-# Add new session entry
-if isinstance(index, dict):
-    # Format varies - could be a dict keyed by session ID or have a sessions array
-    index[new_id] = {
-        "id": new_id,
-        "name": new_slug or "merged-session",
-        "slug": new_slug or "merged-session",
-        "createdAt": first_ts,
-        "lastActivityAt": last_ts,
-        "messageCount": line_count,
-        "merged": True,
-        "mergedAt": "$( date -u +%Y-%m-%dT%H:%M:%S.000Z )"
-    }
-elif isinstance(index, list):
-    index.append({
-        "id": new_id,
-        "name": new_slug or "merged-session",
-        "slug": new_slug or "merged-session",
-        "createdAt": first_ts,
-        "lastActivityAt": last_ts,
-        "messageCount": line_count,
-        "merged": True
-    })
+    info "Updating sessions-index.json..."
+
+    local tmp_idx="/tmp/merge_index_$$.py"
+    cat > "$tmp_idx" << 'IDXEOF'
+import json, os, sys
+
+index_file = sys.argv[1]
+new_id = sys.argv[2]
+new_slug = sys.argv[3] or "merged-session"
+first_ts = sys.argv[4]
+last_ts = sys.argv[5]
+line_count = int(sys.argv[6])
+first_prompt = sys.argv[7]
+merged_jsonl = sys.argv[8]
+
+# Load existing index or create new one
+index = None
+if os.path.exists(index_file):
+    try:
+        with open(index_file, 'r') as f:
+            index = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        pass
+
+# Build the new entry
+mtime_ms = int(os.path.getmtime(merged_jsonl) * 1000) if os.path.exists(merged_jsonl) else 0
+entry = {
+    "sessionId": new_id,
+    "fullPath": os.path.abspath(merged_jsonl),
+    "fileMtime": mtime_ms,
+    "firstPrompt": first_prompt,
+    "customTitle": new_slug,
+    "summary": f"Merged session: {new_slug}",
+    "lastActivityAt": last_ts,
+    "messageCount": line_count,
+    "merged": True
+}
+
+# Add to existing index or create new v1 index
+if index and isinstance(index, dict) and "entries" in index:
+    index["entries"].append(entry)
+elif index and isinstance(index, dict):
+    index[new_id] = entry
+elif index and isinstance(index, list):
+    index.append(entry)
+else:
+    # Create new v1 format index
+    index = {"version": 1, "entries": [entry]}
 
 with open(index_file, 'w') as f:
     json.dump(index, f, indent=2)
 
-print(f"Updated {index_file}")
-PYEOF
-    else
-        info "No sessions-index.json found, skipping index update."
-    fi
+print(f"  Sessions index: {index_file}")
+IDXEOF
+
+    python3 "$tmp_idx" \
+        "$index_file" \
+        "$new_session_id" \
+        "$new_slug" \
+        "$first_ts" \
+        "$last_ts" \
+        "$line_count" \
+        "$first_prompt" \
+        "$merged_jsonl"
+
+    rm -f "$tmp_idx"
 }
 
 # Delete source sessions
@@ -373,10 +527,14 @@ delete_sources() {
         rm -f "$CLAUDE_DIR/debug/$sid.txt"
         rm -rf "$CLAUDE_DIR/session-env/$sid/"
 
-        # Remove from todos
+        # Remove from todos (use nullglob to avoid errors if no matches)
+        local _old_nullglob
+        _old_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+        shopt -s nullglob
         for todo_file in "$CLAUDE_DIR/todos/${sid}"*.json; do
-            [ -f "$todo_file" ] && rm -f "$todo_file"
+            rm -f "$todo_file"
         done
+        eval "$_old_nullglob" 2>/dev/null || true
     done
 }
 
@@ -436,7 +594,7 @@ except:
             # Store session data keyed by slug
             if [ -n "$slug" ]; then
                 local key="${slug}|${project_dir}|${session_id}|${file_size}|${line_count}|${first_ts}|${last_ts}|${first_user_msg}"
-                
+
                 # Check if this slug already exists
                 if [ -n "${slug_map[$slug]:-}" ]; then
                     slug_map[$slug]+="
@@ -482,7 +640,7 @@ ${key}"
         while IFS='|' read -r s_slug project_dir session_id file_size line_count first_ts last_ts first_user_msg; do
             local proj_basename
             proj_basename=$(basename "$project_dir")
-            
+
             echo -e "  ${YELLOW}[$session_num/$count]${NC} ${CYAN}${session_id}${NC}"
             echo "      Project: $proj_basename"
             echo "      Size: $file_size ($line_count lines)"
@@ -491,7 +649,7 @@ ${key}"
                 echo "      First msg: $first_user_msg"
             fi
             echo ""
-            
+
             session_num=$((session_num + 1))
         done <<< "$sessions_data"
 
@@ -626,15 +784,11 @@ ${key}"
         if [ ${#session_ids[@]} -ge 2 ]; then
             info "Merging ${#session_ids[@]} sessions with slug '${slug}'..."
 
-            # Call merge_jsonl_files and related functions
-            # Use the first session's project as target
-            local first_session_id="${session_ids[0]}"
-            local target_project=""
-            target_project=$(find_session_project "$first_session_id")
-
-            if [ -z "$target_project" ]; then
-                error "Could not find project for session $first_session_id"
-            fi
+            # Always target home directory project for resumability from ~
+            local home_key
+            home_key=$(echo "$HOME" | sed 's|/|-|g')
+            local target_project="$PROJECTS_DIR/${home_key}/"
+            mkdir -p "$target_project"
 
             declare -a jsonl_files
             for sid in "${session_ids[@]}"; do
@@ -766,12 +920,14 @@ for sid in "${SESSION_IDS[@]}"; do
     fi
     JSONL_FILES+=("${project_dir}${sid}.jsonl")
     FOUND_PROJECTS+=("$project_dir")
-
-    # Use the first session's project as the target
-    if [ -z "$TARGET_PROJECT" ]; then
-        TARGET_PROJECT="$project_dir"
-    fi
 done
+
+# Always target the home directory project so merged sessions are
+# resumable from ~ regardless of where the source sessions lived.
+# The home project key is the encoded $HOME path (e.g. -Users-quileesimeon)
+HOME_PROJECT_KEY=$(echo "$HOME" | sed 's|/|-|g')
+TARGET_PROJECT="$PROJECTS_DIR/${HOME_PROJECT_KEY}/"
+mkdir -p "$TARGET_PROJECT"
 
 # Generate or use provided output ID
 NEW_SESSION_ID="${OUTPUT_ID:-$(generate_uuid)}"
@@ -828,7 +984,10 @@ echo -e "  Size: $merged_size ($merged_lines lines)"
 echo -e "  Session ID: $NEW_SESSION_ID"
 [ -n "$NAME" ] && echo -e "  Name: $NAME"
 echo ""
-echo -e "Resume with: ${BOLD}claude --resume${NC} (and find '$NAME' or the new session in the picker)"
+echo ""
+echo -e "To resume (from ${BOLD}~${NC}):"
+echo -e "  ${BOLD}cd ~ && claude --resume $NEW_SESSION_ID${NC}"
 if [ -n "$NAME" ]; then
-    echo -e "Or directly: ${BOLD}claude --resume '$NAME'${NC}"
+    echo -e "  (Once inside, the session will be named '${GREEN}$NAME${NC}')"
+    echo -e "  You can also try: ${BOLD}cd ~ && claude --resume '$NAME'${NC}"
 fi
