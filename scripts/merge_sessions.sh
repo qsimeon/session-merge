@@ -17,7 +17,9 @@
 #   --help                 Show this help message
 #
 # The script:
-#   1. Locates all source session JSONL files across ~/.claude/projects/
+#   1. Locates all source session JSONL files across the active Claude config
+#      directory's projects/ folder (honours $CLAUDE_CONFIG_DIR, falls back to
+#      ~/.claude/; can be overridden with $CLAUDE_DIR)
 #   2. Combines their entries sorted by timestamp
 #   3. Rewrites sessionId fields to the new merged session ID
 #   4. Copies subagent files from all sources
@@ -41,7 +43,7 @@ fi
 
 set -euo pipefail
 
-CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
+CLAUDE_DIR="${CLAUDE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
 PROJECTS_DIR="$CLAUDE_DIR/projects"
 
 # Colors for output
