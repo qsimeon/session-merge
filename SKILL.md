@@ -35,6 +35,7 @@ This skill includes a bash script at `scripts/merge_sessions.sh` that handles th
 - `--name <name>` — Set a name/slug for the merged session
 - `--delete-sources` — Remove the original sessions after merging
 - `--dry-run` — Preview the merge without making changes
+- `--target-project <path>` — Place the merged session in this project directory. Default behaviour: when all sources share one project, the merged session is placed there; otherwise it lands in the `$HOME` project
 
 ## Workflow
 
@@ -96,7 +97,7 @@ After merging, confirm success by:
 
 1. Checking the merged file exists and has the expected size
 2. Running `--list` again to show the new session appears
-3. **IMPORTANT**: Tell the user to resume using the **session ID** (UUID), not the name. The name may not appear in the picker immediately. Example: `cd ~ && claude --resume <session-uuid>`. Once inside the session, the name will be set correctly and they can rename if needed.
+3. **IMPORTANT**: Tell the user to resume using the **session ID** (UUID), not the name. The name may not appear in the picker immediately. The script's final output prints the exact `cd <target-project> && claude --resume <session-uuid>` to use — that working directory depends on where the merge landed (shared project, `--target-project` override, or `$HOME` fallback). Once inside the session, the name will be set correctly and they can rename if needed.
 
 ### Optional: Auto-Merge All Splits
 
@@ -131,11 +132,17 @@ The tree stitching ensures Claude Code can walk one continuous parentUuid chain 
 
 ## Where Merged Sessions Live
 
-**All merged sessions are placed in the home directory project** (`~/.claude/projects/-Users-<username>/`). This means merged sessions are always resumable from `~` with `cd ~ && claude --resume "session-name"`, regardless of which project directories the source sessions originally came from.
+The merged session's destination is resolved in this order:
+
+1. **`--target-project <path>` flag** — if set, the merged session lands in the project keyed by that path. Honoured for both single merges and `--merge-splits` runs.
+2. **Shared source project** — if all source sessions live in the same project (e.g. all under `/Volumes/Data/Odroid`), the merged session is placed there. This is the common case for reuniting compaction-split sessions, and the resume command will use that project's working directory.
+3. **`$HOME` project fallback** — when sources come from different projects, the merge lands in `~/.claude/projects/-Users-<username>/` so it's always resumable from `~`.
+
+After the merge, the script prints the exact `cd <path> && claude --resume <id>` command for the chosen target, so you don't have to guess where it ended up.
 
 ## Important Caveats
 
-- **Resume from home**: Merged sessions always live in the `~` project. Resume with `cd ~ && claude --resume "name"`.
+- **Resume location depends on sources**: When all sources share a project, the merged session is placed there — resume from that project's working directory. Otherwise it falls back to the `$HOME` project (`cd ~ && claude --resume "name"`). The script's final output prints the exact `cd … && claude --resume …` line for the chosen target.
 - **No semantic deduplication**: This is a chronological merge, not a smart content-aware merge. If both sessions have overlapping content (e.g., the same file was read in both), both entries appear in the merged history.
 - **Context window**: Merging doesn't change Claude's context window behavior. When you resume the merged session, Claude still has its normal context limits. But the full history is available for reference and the session picker will show it as one session.
 - **Backup recommendation**: The `--dry-run` flag exists for a reason. Encourage users to verify before committing, and suggest keeping source sessions until they've confirmed the merge looks right.
