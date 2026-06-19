@@ -545,7 +545,7 @@ find_splits() {
 
     declare -A slug_map      # slug -> "project_dir|session_id|size|lines|first_ts|last_ts|first_msg"
     declare -A slug_count    # slug -> count of sessions with this slug
-    declare -a split_slugs   # list of slugs that have splits
+    declare -a split_slugs=()   # list of slugs that have splits
 
     for project_dir in "$PROJECTS_DIR"/*/; do
         [ -d "$project_dir" ] || continue
@@ -677,7 +677,7 @@ merge_splits() {
 
     declare -A slug_map      # slug -> "project_dir|session_id|size|lines|first_ts|last_ts|first_msg"
     declare -A slug_count    # slug -> count
-    declare -a split_slugs   # slugs with splits
+    declare -a split_slugs=()   # slugs with splits
 
     for project_dir in "$PROJECTS_DIR"/*/; do
         [ -d "$project_dir" ] || continue
