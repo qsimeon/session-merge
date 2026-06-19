@@ -6,15 +6,18 @@
 #   merge_sessions.sh [OPTIONS] <session-id-1> <session-id-2> [session-id-3 ...]
 #
 # Options:
-#   --name <name>          Name/slug for the merged session (default: auto-generated)
-#   --delete-sources       Delete source session files after successful merge
-#   --dry-run              Show what would happen without making changes
-#   --output-id <uuid>     Use a specific UUID for the merged session (default: auto-generated)
-#   --list                 List all sessions across all projects, then exit
-#   --list-project <path>  List sessions for a specific project path, then exit
-#   --find-splits          Find and display all split session groups, then exit
-#   --merge-splits         Automatically merge all split session groups (with confirmation)
-#   --help                 Show this help message
+#   --name <name>            Name/slug for the merged session (default: auto-generated)
+#   --delete-sources         Delete source session files after successful merge
+#   --dry-run                Show what would happen without making changes
+#   --output-id <uuid>       Use a specific UUID for the merged session (default: auto-generated)
+#   --target-project <path>  Place merged session in this project directory.
+#                            Default: shared project if all sources share one,
+#                            otherwise $HOME so it stays resumable from ~.
+#   --list                   List all sessions across all projects, then exit
+#   --list-project <path>    List sessions for a specific project path, then exit
+#   --find-splits            Find and display all split session groups, then exit
+#   --merge-splits           Automatically merge all split session groups (with confirmation)
+#   --help                   Show this help message
 #
 # The script:
 #   1. Locates all source session JSONL files across ~/.claude/projects/
@@ -54,7 +57,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 usage() {
-    head -27 "$0" | tail -25 | sed 's/^# \?//'
+    head -30 "$0" | tail -28 | sed 's/^# \?//'
     exit 0
 }
 
@@ -98,6 +101,40 @@ find_session_project() {
     done
 
     echo "$found"
+}
+
+# Resolve the project directory where a merged session should live.
+# Precedence:
+#   1. $TARGET_PROJECT_OVERRIDE if set (path → project key)
+#   2. The single project shared by all sources, if they share one
+#   3. The $HOME project (fallback, ensures resumability from ~)
+# Args: one or more source project directories (each with trailing /)
+# Echoes: the resolved target project directory (with trailing /)
+resolve_target_project() {
+    local source_projects=("$@")
+    if [ -n "${TARGET_PROJECT_OVERRIDE:-}" ]; then
+        # Strip trailing slash so '/foo/' and '/foo' both encode the same.
+        local override_path="${TARGET_PROJECT_OVERRIDE%/}"
+        local override_key
+        override_key=$(echo "$override_path" | sed 's|/|-|g')
+        echo "$PROJECTS_DIR/${override_key}/"
+        return
+    fi
+    local shared="${source_projects[0]}"
+    local p
+    for p in "${source_projects[@]}"; do
+        if [ "$p" != "$shared" ]; then
+            shared=""
+            break
+        fi
+    done
+    if [ -n "$shared" ]; then
+        echo "$shared"
+        return
+    fi
+    local home_key
+    home_key=$(echo "$HOME" | sed 's|/|-|g')
+    echo "$PROJECTS_DIR/${home_key}/"
 }
 
 # List all sessions across all projects
@@ -784,18 +821,19 @@ ${key}"
         if [ ${#session_ids[@]} -ge 2 ]; then
             info "Merging ${#session_ids[@]} sessions with slug '${slug}'..."
 
-            # Always target home directory project for resumability from ~
-            local home_key
-            home_key=$(echo "$HOME" | sed 's|/|-|g')
-            local target_project="$PROJECTS_DIR/${home_key}/"
-            mkdir -p "$target_project"
-
-            declare -a jsonl_files
+            declare -a jsonl_files=()
+            declare -a source_projects=()
             for sid in "${session_ids[@]}"; do
                 local proj
                 proj=$(find_session_project "$sid")
                 jsonl_files+=("${proj}${sid}.jsonl")
+                source_projects+=("$proj")
             done
+
+            # Resolve target (override → shared source project → $HOME)
+            local target_project
+            target_project=$(resolve_target_project "${source_projects[@]}")
+            mkdir -p "$target_project"
 
             local new_uuid
             new_uuid=$(generate_uuid)
@@ -827,6 +865,7 @@ NAME=""
 DELETE_SOURCES=false
 DRY_RUN=false
 OUTPUT_ID=""
+TARGET_PROJECT_OVERRIDE=""
 LIST_MODE=false
 LIST_PROJECT=""
 FIND_SPLITS=false
@@ -849,6 +888,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output-id)
             OUTPUT_ID="$2"
+            shift 2
+            ;;
+        --target-project)
+            TARGET_PROJECT_OVERRIDE="$2"
             shift 2
             ;;
         --list)
@@ -922,11 +965,8 @@ for sid in "${SESSION_IDS[@]}"; do
     FOUND_PROJECTS+=("$project_dir")
 done
 
-# Always target the home directory project so merged sessions are
-# resumable from ~ regardless of where the source sessions lived.
-# The home project key is the encoded $HOME path (e.g. -Users-quileesimeon)
-HOME_PROJECT_KEY=$(echo "$HOME" | sed 's|/|-|g')
-TARGET_PROJECT="$PROJECTS_DIR/${HOME_PROJECT_KEY}/"
+# Resolve where the merged session will live (see resolve_target_project).
+TARGET_PROJECT=$(resolve_target_project "${FOUND_PROJECTS[@]}")
 mkdir -p "$TARGET_PROJECT"
 
 # Generate or use provided output ID
@@ -985,9 +1025,16 @@ echo -e "  Session ID: $NEW_SESSION_ID"
 [ -n "$NAME" ] && echo -e "  Name: $NAME"
 echo ""
 echo ""
-echo -e "To resume (from ${BOLD}~${NC}):"
-echo -e "  ${BOLD}cd ~ && claude --resume $NEW_SESSION_ID${NC}"
+# Decode target project key (e.g. -Volumes-Data-Odroid) back to a cwd path,
+# and use `~` if it matches $HOME for a friendlier hint.
+target_basename=$(basename "$TARGET_PROJECT")
+target_cwd=$(echo "$target_basename" | sed 's/-/\//g')
+if [ "$target_cwd" = "$HOME" ]; then
+    target_cwd="~"
+fi
+echo -e "To resume (from ${BOLD}${target_cwd}${NC}):"
+echo -e "  ${BOLD}cd ${target_cwd} && claude --resume $NEW_SESSION_ID${NC}"
 if [ -n "$NAME" ]; then
     echo -e "  (Once inside, the session will be named '${GREEN}$NAME${NC}')"
-    echo -e "  You can also try: ${BOLD}cd ~ && claude --resume '$NAME'${NC}"
+    echo -e "  You can also try: ${BOLD}cd ${target_cwd} && claude --resume '$NAME'${NC}"
 fi
